@@ -85,7 +85,8 @@ class nnUNetTrainer(object):
         # https://www.osnews.com/images/comics/wtfm.jpg
         # https://i.pinimg.com/originals/26/b2/50/26b250a738ea4abc7a5af4d42ad93af0.jpg
 
-        self.is_ddp = dist.is_available() and dist.is_initialized()
+        self.is_ddp = False
+        # self.is_ddp = dist.is_available() and dist.is_initialized()
         self.local_rank = 0 if not self.is_ddp else dist.get_rank()
 
         self.device = device
@@ -212,35 +213,52 @@ class nnUNetTrainer(object):
                                                            self.num_input_channels,
                                                            enable_deep_supervision=True).to(self.device)
             network1_pretrained_weights_file = '/gpfs/home/xz2223/Project/nnUNetV2/nnUNet_results/Dataset011_009SingleLableAbnomal/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_T1mod/checkpoint_best.pth'
-            load_pretrained_weights(self.network1, network1_pretrained_weights_file, verbose=True)
+            
+            if os.path.exists(network1_pretrained_weights_file):
+                load_pretrained_weights(self.network1, network1_pretrained_weights_file)
+            else:
+                print("No pretrained weights loaded for network1.")
+
             self.network2 = self.build_network_architecture(self.plans_manager, self.dataset_json,
                                                            self.configuration_manager,
                                                            self.num_input_channels,
                                                            enable_deep_supervision=True).to(self.device)
             network2_pretrained_weights_file = '/gpfs/home/xz2223/Project/nnUNetV2/nnUNet_results/Dataset011_009SingleLableAbnomal/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_T1cemod/checkpoint_best.pth'
             
-            load_pretrained_weights(self.network2, network2_pretrained_weights_file, verbose=True)
+            if os.path.exists(network2_pretrained_weights_file):
+                load_pretrained_weights(self.network2, network2_pretrained_weights_file, verbose=True)
+            else:
+                print("No pretrained weights loaded for network2.")
             
             self.network3 = self.build_network_architecture(self.plans_manager, self.dataset_json,
                                                            self.configuration_manager,
                                                            self.num_input_channels,
                                                            enable_deep_supervision=True).to(self.device)
             network3_pretrained_weights_file = '/gpfs/home/xz2223/Project/nnUNetV2/nnUNet_results/Dataset011_009SingleLableAbnomal/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_T2mod/checkpoint_best.pth'
-            load_pretrained_weights(self.network3, network3_pretrained_weights_file, verbose=True)
-            
+            if os.path.exists(network3_pretrained_weights_file):
+                load_pretrained_weights(self.network3, network3_pretrained_weights_file, verbose=True)
+            else:
+                print("No pretrained weights loaded for network3.")
+                        
             self.network4 = self.build_network_architecture(self.plans_manager, self.dataset_json,
                                                            self.configuration_manager,
                                                            self.num_input_channels,
                                                            enable_deep_supervision=True).to(self.device)
             network4_pretrained_weights_file = '/gpfs/home/xz2223/Project/nnUNetV2/nnUNet_results/Dataset011_009SingleLableAbnomal/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_FLAIRmod/checkpoint_best.pth'
-            load_pretrained_weights(self.network4, network4_pretrained_weights_file, verbose=True)
+            if os.path.exists(network4_pretrained_weights_file):
+                load_pretrained_weights(self.network4, network4_pretrained_weights_file, verbose=True)
+            else:
+                print("No pretrained weights loaded for network4.")
             
             self.network5 = self.build_network_architecture(self.plans_manager, self.dataset_json,
                                                            self.configuration_manager,
                                                            self.num_input_channels,
                                                            enable_deep_supervision=True).to(self.device)
             network5_pretrained_weights_file = '/gpfs/home/xz2223/Project/nnUNetV2/nnUNet_results/Dataset011_009SingleLableAbnomal/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_DWImod/checkpoint_best.pth'
-            load_pretrained_weights(self.network5, network5_pretrained_weights_file, verbose=True)
+            if os.path.exists(network5_pretrained_weights_file):
+                load_pretrained_weights(self.network5, network5_pretrained_weights_file, verbose=True)
+            else:
+                print("No pretrained weights loaded for network5.")
             
             self.print_to_log_file('Load experts from :',network5_pretrained_weights_file)
             # compile network for free speedup
@@ -338,50 +356,52 @@ class nnUNetTrainer(object):
 
     def _set_batch_size_and_oversample(self):
         if not self.is_ddp:
-            # set batch size to what the plan says, leave oversample untouched
-            self.batch_size = self.configuration_manager.batch_size
-        else:
-            # batch size is distributed over DDP workers and we need to change oversample_percent for each worker
-            batch_sizes = []
-            oversample_percents = []
+            # 🟢 단일 GPU일 경우: plan에 정의된 배치사이즈나 8 중 더 작은 걸로 설정
+            self.batch_size = min(8, self.configuration_manager.batch_size)
+            self.oversample_foreground_percent = self.oversample_foreground_percent  # 그대로 유지
+            print(f"[Single-GPU] batch_size: {self.batch_size}, oversample: {self.oversample_foreground_percent}")
+            return
 
+        # 🔵 DDP 환경일 경우
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized():
             world_size = dist.get_world_size()
             my_rank = dist.get_rank()
+        else:
+            raise RuntimeError("DDP 사용 중인데 process group이 초기화되지 않았습니다.")
 
-            global_batch_size = self.configuration_manager.batch_size
-            assert global_batch_size >= world_size, 'Cannot run DDP if the batch size is smaller than the number of ' \
-                                                    'GPUs... Duh.'
+        global_batch_size = self.configuration_manager.batch_size
+        assert global_batch_size >= world_size, 'Batch size must be >= number of GPUs.'
 
-            batch_size_per_GPU = np.ceil(global_batch_size / world_size).astype(int)
+        batch_size_per_GPU = np.ceil(global_batch_size / world_size).astype(int)
+        batch_sizes = []
+        oversample_percents = []
 
-            for rank in range(world_size):
-                if (rank + 1) * batch_size_per_GPU > global_batch_size:
-                    batch_size = batch_size_per_GPU - ((rank + 1) * batch_size_per_GPU - global_batch_size)
-                else:
-                    batch_size = batch_size_per_GPU
+        for rank in range(world_size):
+            if (rank + 1) * batch_size_per_GPU > global_batch_size:
+                batch_size = batch_size_per_GPU - ((rank + 1) * batch_size_per_GPU - global_batch_size)
+            else:
+                batch_size = batch_size_per_GPU
+            batch_sizes.append(batch_size)
 
-                batch_sizes.append(batch_size)
+            sample_id_low = 0 if len(batch_sizes) == 0 else np.sum(batch_sizes[:-1])
+            sample_id_high = np.sum(batch_sizes)
 
-                sample_id_low = 0 if len(batch_sizes) == 0 else np.sum(batch_sizes[:-1])
-                sample_id_high = np.sum(batch_sizes)
+            if sample_id_high / global_batch_size < (1 - self.oversample_foreground_percent):
+                oversample_percents.append(0.0)
+            elif sample_id_low / global_batch_size > (1 - self.oversample_foreground_percent):
+                oversample_percents.append(1.0)
+            else:
+                percent_covered_by_this_rank = sample_id_high / global_batch_size - sample_id_low / global_batch_size
+                oversample_percent_here = 1 - (((1 - self.oversample_foreground_percent) -
+                                                sample_id_low / global_batch_size) / percent_covered_by_this_rank)
+                oversample_percents.append(oversample_percent_here)
 
-                if sample_id_high / global_batch_size < (1 - self.oversample_foreground_percent):
-                    oversample_percents.append(0.0)
-                elif sample_id_low / global_batch_size > (1 - self.oversample_foreground_percent):
-                    oversample_percents.append(1.0)
-                else:
-                    percent_covered_by_this_rank = sample_id_high / global_batch_size - sample_id_low / global_batch_size
-                    oversample_percent_here = 1 - (((1 - self.oversample_foreground_percent) -
-                                                    sample_id_low / global_batch_size) / percent_covered_by_this_rank)
-                    oversample_percents.append(oversample_percent_here)
+        self.batch_size = batch_sizes[my_rank]
+        self.oversample_foreground_percent = oversample_percents[my_rank]
+        print(f"[DDP] rank {my_rank} batch_size: {self.batch_size}, oversample: {self.oversample_foreground_percent}")
 
-            print("worker", my_rank, "oversample", oversample_percents[my_rank])
-            print("worker", my_rank, "batch_size", batch_sizes[my_rank])
-            # self.print_to_log_file("worker", my_rank, "oversample", oversample_percents[my_rank])
-            # self.print_to_log_file("worker", my_rank, "batch_size", batch_sizes[my_rank])
-
-            self.batch_size = batch_sizes[my_rank]
-            self.oversample_foreground_percent = oversample_percents[my_rank]
 
     def _build_loss(self):
         if self.label_manager.has_regions:
@@ -561,7 +581,7 @@ class nnUNetTrainer(object):
         :return:
         """
         import json
-        json_path = '/gpfs/home/xz2223/Project/nnUNetV2/Codes/nnUNet_JsonData_debugwith5Experts_abnormal_from_scratch/datasplit.json'
+        json_path = "D:/workspace/KHU-AI-Practical-Research/MoME/MoME_foundation/datasplit.json"
         with open(json_path, 'r') as json_file:
             DATA = json.load(json_file)
         if self.fold == 'MoME':
@@ -1057,7 +1077,7 @@ class nnUNetTrainer(object):
             elif 'DWI_' in key:
                 modkey.append(4)
             else:
-                print('worng key')        
+                print('wrong key')        
 
         data = data.to(self.device, non_blocking=True)
         if isinstance(target, list):
@@ -1077,7 +1097,7 @@ class nnUNetTrainer(object):
             Feature4,output4 = self.network4(data)
             Feature5,output5 = self.network5(data)
             
-            coutput = torch.cat((data,Feature1[0], Feature2[0],Feature3[0], Feature4[0], Feature5[0]), dim=1)  #(2,1+32+32,128,128,128)
+            coutput = torch.cat((data[:, 0:1], Feature1[0], Feature2[0], Feature3[0], Feature4[0], Feature5[0]), dim=1)
             # coutput_debug = torch.cat((output1[0], output2[0]), dim=1)
             _,output = self.network(coutput)
             Final_output = [output1[i]*output[i][:,:2,:,:,:]+output2[i]*output[i][:,2:4,:,:,:]+output3[i]*output[i][:,4:6,:,:,:] \
@@ -1220,9 +1240,20 @@ class nnUNetTrainer(object):
         tp = np.sum(outputs_collated['tp_hard'], 0)
         fp = np.sum(outputs_collated['fp_hard'], 0)
         fn = np.sum(outputs_collated['fn_hard'], 0)
-
-        if self.is_ddp:
+    
+        if self.is_ddp and dist.is_available() and dist.is_initialized():
             world_size = dist.get_world_size()
+            tps = [None for _ in range(world_size)]
+            fps = [None for _ in range(world_size)]
+            fns = [None for _ in range(world_size)]
+
+            dist.all_gather_object(tps, tp)
+            dist.all_gather_object(fps, fp)
+            dist.all_gather_object(fns, fn)
+
+            tp = np.sum(tps, 0)
+            fp = np.sum(fps, 0)
+            fn = np.sum(fns, 0)
 
             tps = [None for _ in range(world_size)]
             dist.all_gather_object(tps, tp)
